@@ -12,6 +12,75 @@ var log = false
 // var debug = true
 // var log = true
 
+// 缓存相关变量
+var thumbnailCache = {};
+var thumbnailCacheEnabled = true;
+var thumbnailCacheExpiry = 3600000; // 缓存有效期，默认1小时（毫秒）
+
+// 缓存管理函数
+function getThumbnailFromCache(imagePath) {
+  if (!thumbnailCacheEnabled) return null;
+  
+  const cachedItem = thumbnailCache[imagePath];
+  if (!cachedItem) return null;
+  
+  // 检查缓存是否过期
+  if (Date.now() - cachedItem.timestamp > thumbnailCacheExpiry) {
+    delete thumbnailCache[imagePath];
+    return null;
+  }
+  
+  return cachedItem.data;
+}
+
+function saveThumbnailToCache(imagePath, url) {
+  if (!thumbnailCacheEnabled) return;
+  
+  thumbnailCache[imagePath] = {
+    data: url,
+    timestamp: Date.now()
+  };
+  
+  // 如果缓存太大，清理最旧的项目
+  const maxCacheItems = 500;
+  const cacheKeys = Object.keys(thumbnailCache);
+  if (cacheKeys.length > maxCacheItems) {
+    // 按时间戳排序
+    cacheKeys.sort((a, b) => thumbnailCache[a].timestamp - thumbnailCache[b].timestamp);
+    // 删除最旧的20%
+    const itemsToRemove = Math.floor(cacheKeys.length * 0.2);
+    for (let i = 0; i <itemsToRemove; i++) {
+      delete thumbnailCache[cacheKeys[i]];
+    }
+  }
+  
+  // 将缓存保存到localStorage
+  try {
+    localStorage.setItem('thumbnails.CacheTimestamp', Date.now().toString());
+    // 不保存整个缓存，因为可能会超出localStorage限制
+  } catch (e) {
+    console.warn('Failed to save thumbnail cache timestamp:', e);
+  }
+}
+
+// 清除过期缓存
+function cleanExpiredCache() {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  for (const key in thumbnailCache) {
+    if (now - thumbnailCache[key].timestamp > thumbnailCacheExpiry) {
+      delete thumbnailCache[key];
+      cleaned++;
+    }
+  }
+  
+  if (debug && cleaned > 0) console.debug(`Cleaned ${cleaned} expired thumbnail cache items`);
+}
+
+// 初始化时清理过期缓存
+cleanExpiredCache();
+
 // we don't need that at all
 // /ComfyUIThumbnails is defined in __init__.py as pointing to assets/
 // loadScript('/ComfyUIThumbnails/js/imagesloaded.pkgd.min.js').catch((e) => {
@@ -152,188 +221,141 @@ async function checkLink(url) { return (await fetch(url)).ok }
 // var addImg = async function(div, thisRoot, foldersDict){
 // var addImg = async function(div, thisRoot,ctxMenu, values, options, thiss){
 var addImg = async function(div, thisRoot, ctxMenu, options){
-  // http://127.0.0.1:8188/view?subfolder=pose&filename=pose-01.jpg&type=input
-  // http://127.0.0.1:8188/view?filename=ComfyUI_00011_.png&type=input
-  // https://css-tricks.com/piecing-together-approaches-for-a-css-masonry-layout/
-  if (debug) console.debug('addImg: ctxMenu', ctxMenu);
-  if (debug) console.debug('addImg: options', options);
-  if (debug) console.debug('addImg: div', div);
-  if (debug) console.debug('addImg: thisRoot', thisRoot);
-  if (debug) console.log('addImg: getListFromStorage', getListFromStorage('thumbnails.Folders'));
-
-  let foldersDict = getDictFromStorage('thumbnails.Folders')  // 1.25: now we rebuild foldersDict here, it's the only way to not lose its content because we alter 'values' in ext
-  if (debug) console.log('addImg: foldersDict', foldersDict);
+  // 获取图像信息
+  const filenameUri = div.getAttribute('data-value');
+  if (!filenameUri) return div;
   
-  // add masonery css to the div
-  div.classList.add("masonry-item");
+  // 获取缩略图尺寸设置
+  const thumbnailSize = app.ui.settings.getSettingValue("Thumbnails.ContextMenuOptions.thumbnailSize") || thumbnailSizeDefault;
+  const maxHeight = thumbnailSize;
   
-  let filename = div.getAttribute('data-value');
-  let fileext = filename.split('.').pop();
-  // let isFolder = (filename == fileext) ? true : false;
-  let isFolder = (foldersDict[filename] || filename == '..') ? true : false;
-
-
-  if (debug) console.log('addImg: filename=', filename); // misc, foldername2... or example.png, etc
-  if (debug) console.log(`addImg: filename=${filename} fileext=${fileext} isFolder=${isFolder} foldersDict[${filename}]=`, foldersDict[filename]);
+  // 获取是否显示文件名设置
+  const enableNames = app.ui.settings.getSettingValue("Thumbnails.ContextMenuOptions.enableNames");
   
-  // refuse to show anything else then images and folders: as a matter of fact, LoadImage will not filter images and return every file
-  // Therefore, we also filter out extensions not in imagesExt
-  if (!isFolder && !imagesExt.includes(fileext)) {
-    console.log(`addImg: deleteNode ${filename}`);
-    deleteNode(filename, thisRoot)
-    return;
+  // 设置标题和样式
+  const title = `${filenameUri}`;
+  div.setAttribute('title', title);
+  div.classList.add('masonry-item');
+  
+  // 检查是否是文件夹
+  let foldersDict = getDictFromStorage('thumbnails.Folders');
+  const isFolder = (foldersDict[filenameUri] || filenameUri == '..') ? true : false;
+  
+  // 设置文本显示
+  if (!enableNames) { 
+    div.classList.add('hideText'); 
+  } else { 
+    div.classList.add('showText'); 
   }
   
-  // bypass images that were deleted in this session; there will be a bug if you re-add the same image name, as it won't show up indeed.
-  // A browser refresh will empty the local storage and fix the bug
-  // Therefore, we should intercept onDragDrop called (widgets.js:507) to fix this bug
-  // if (!checkLink(src)) return; // does not work fast enough
-  // if (!urlExists(src)) return; // works but still slow and producces errors in console
-  // let thumbnails.DeletedImages = getListFromStorage()
-  let deletedImages = getListFromStorage('thumbnails.DeletedImages')
-  if (debug) console.debug('addImg: filename', filename, 'deletedImages', deletedImages);
-  if (deletedImages.includes(filename)) return;
+  // 构建图像URL
+  let src;
   
-  let filenameUri = encodeURIComponent(filename);
-  // /LoadImageThumbnails is defined in __init__.py as pointing to assets/
-  let src = 'LoadImageThumbnails/folder.png';
-  
-  // handle 1 level of subfolders; we cannot have "/" in the filename, server.py crashes LoadImage otherwise
-  // if (filename.slice(-1) !== '/') {
-  if (!isFolder) {
-    if (debug) console.log('addImg: options?.folder == filename?',options?.folder,filename);
-    if (options?.folder !== undefined) {
-      src = `view?subfolder=${encodeURIComponent(options?.folder)}&filename=${filenameUri}&type=input`;
-    } else {
-      src = `view?filename=${filenameUri}&type=input`;
-      // "/view?" + new URLSearchParams(filepath).toString() + app.getPreviewFormatParam() + app.getRandParam()
-    }
-    if (debug) console.log('addImg: src',src);
-
-    // preload image and detect size
-    let img=new Image();
-    img.onload = function() {
-      div.dataset.size = `${this.width}x${this.height}`;
-    }
-    img.src=src;
-  } else {
-
-    // ███████  ██████  ██      ██████  ███████ ██████  
-    // ██      ██    ██ ██      ██   ██ ██      ██   ██ 
-    // █████   ██    ██ ██      ██   ██ █████   ██████  
-    // ██      ██    ██ ██      ██   ██ ██      ██   ██ 
-    // ██       ██████  ███████ ██████  ███████ ██   ██ 
-
-
+  if (isFolder) {
+    // 文件夹使用特殊图标
+    src = 'LoadImageThumbnails/folder.png';
     div.classList.add("folder");
-    div.dataset.size = filename;
-    div.dataset.files = foldersDict[filename];
-    // let files
-    if (debug) console.debug('addImg: foldersDict',foldersDict);
-    // for (const folder of folders) {if (folder.name == filename) files = folder.files }
+    div.dataset.size = filenameUri;
+    div.dataset.files = foldersDict[filenameUri];
     
-    // cloning the div removes click eventListener inner_onclick() from litegraph.core.js: == removeListeners as we cannot remove a listener created outside this scope
+    // 处理文件夹点击事件
     let divClone = div.cloneNode(true);
     div.replaceWith(divClone);
-    div = divClone
+    div = divClone;
     div.onclick = () => {
-      if (debug) console.debug('addImg: click filename=',filename);
-      if (filename == '..') {
+      if (debug) console.debug('addImg: click filename=', filenameUri);
+      if (filenameUri == '..') {
         div.parentElement.remove();
         return;
       }
-      options.folder = filename   // goal is to use this extra option as subfolder, not sure how yet; now we just check if we're in a subfolder already
+      options.folder = filenameUri;
 
-			// if (debug) console.log(foldersDict[filename]);               // this prints the correct list of files inside that folder
-			// if (debug) console.log('thiss',thiss);                       // undefined
-			// if (debug) console.log('values',values);                     // Array(19) [ "3d", "misc", "pose", "tmp", "badgers.png", ..
-			// if (debug) console.log('options?.folder',options?.folder);   // misc, pose ..
-
-      if (!foldersDict[filename][0].startsWith(filename)) {
-        // modify the images paths so they are loaded onclick
-        foldersDict[filename] = foldersDict[filename].map(file => { return `${filename}/${file}` });
+      if (foldersDict[filenameUri] && foldersDict[filenameUri].length > 0 && !foldersDict[filenameUri][0].startsWith(filenameUri)) {
+        // 修改图像路径以便于加载
+        foldersDict[filenameUri] = foldersDict[filenameUri].map(file => { return `${filenameUri}/${file}` });
       }
 
-      // return ctxMenu.call({}, foldersDict[filename], options);   // this reloads a new LoadImage only, no css, with correct list of files, but on top of the other
-      if (foldersDict[filename][0] !== '..') foldersDict[filename].unshift('..');
-      let ctx = ctxMenu.call(this, foldersDict[filename], options);
-      let thisRoot = ctx.root
+      // 添加返回上级目录选项
+      if (foldersDict[filenameUri] && foldersDict[filenameUri][0] !== '..') {
+        foldersDict[filenameUri].unshift('..');
+      }
+      
+      let ctx = ctxMenu.call(this, foldersDict[filenameUri], options);
+      let thisRoot = ctx.root;
       let items = Array.from(thisRoot.querySelectorAll(".litemenu-entry"));
       let displayedItems = [...items];
       displayedItems = [...items.map(function(el) { return addImg(el, thisRoot, ctxMenu, options) })];
-		} // click subfolder
-  } // subfolder
-
-  let thumbnailSize = app.ui.settings.getSettingValue("Thumbnails.ContextMenuOptions.thumbnailSize");
-  thumbnailSize = (thumbnailSize == undefined) ? thumbnailSizeDefault : thumbnailSize;
-  let maxHeight = thumbnailSize
+    };
+  } else {
+    // 普通图像
+    src = `/view?filename=${encodeURIComponent(filenameUri)}&type=input&subfolder=&format=jpeg&quality=50&width=${thumbnailSize}&height=${thumbnailSize}`;
+  }
   
-  // i'd like to have so sense of which images are bigger then others
-  // let maxHeight = thumbnailSize * (Math.random() * (1.5 - 1) + 1)
+  // 使用原始的HTML插入方式，确保与原代码兼容
+  div.insertAdjacentHTML('afterBegin', `<img decoding="async" loading="lazy" width="400" height="400" style="max-height:${maxHeight}px" class="masonry-content" src="${src}" alt="${filenameUri}" title="${title}">`);
   
-  // if (debug) console.debug('addImg: app.ui.settings', app.ui.settings)
-  // app.ui.settings.settingsValues = Object { "pysssss.SnapToGrid": true, "Thumbnails.enableNames": false, ... }
-  let enableNames = app.ui.settings.getSettingValue("Thumbnails.ContextMenuOptions.enableNames");
-  enableNames = (enableNames == undefined) ? enableNamesDefault : enableNames;
-  let title = (enableNames) ? '' : filename;
-  // if (debug) console.debug('addImg: enableNames', enableNames)
-  // if (debug) console.debug('addImg: fontSize', fontSize)
-  // if (debug) console.debug('addImg: filename', filename, 'filenameUri', filenameUri)
-  // if (debug) console.debug('addImg: div.value', div.value)   // div.value is the filenameDecoded!
-  // if (debug) console.debug('addImg: thisRoot', thisRoot)
-
-  // show or hide thumbnail name
-  if (!enableNames) { div.classList.add('hideText'); } else { div.classList.add('showText'); }
-  // 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.
-  // insert thumbnail inside div
-  div.insertAdjacentHTML( 'afterBegin', `<img decoding="async" loading="lazy" width="400" height="400" style="max-height:${maxHeight}px" class="masonry-content" src="${src}" alt="${filenameUri}" title="${title}">` );
+  // 获取刚插入的图像元素
+  const imgElement = div.querySelector('img');
   
-  // add delete button at top-right for images only
+  // 添加图像加载完成事件，用于缓存
+  if (imgElement && thumbnailCacheEnabled && !isFolder) {
+    imgElement.onload = function() {
+      try {
+        // 记录图像尺寸
+        div.dataset.size = `${imgElement.naturalWidth}x${imgElement.naturalHeight}`;
+        
+        // 缓存图像URL而不是转换为dataURL
+        saveThumbnailToCache(filenameUri, src);
+      } catch (e) {
+        console.warn('Failed to process thumbnail:', e);
+      }
+    };
+  }
+  
+  // 添加删除按钮（仅对非文件夹项目）
   if (!isFolder) {
-    // div.insertAdjacentHTML( 'afterBegin', `<button type="button" class="btn btn-secondary btn-delete" onclick="event.preventDefault();">❌</button>` );
-    // div.insertAdjacentHTML( 'afterBegin', `<button type="button" class="btn btn-secondary btn-delete" data-filename="${filenameUri}">❌</button>` );
     let btnDelete = document.createElement("button");
     btnDelete.appendChild(document.createTextNode("❌"));
     btnDelete.classList.add("btn");
     btnDelete.classList.add("btn-secondary");
     btnDelete.classList.add("btn-delete");
     btnDelete.dataset.filename = filenameUri;
-    div.appendChild(btnDelete)
+    div.appendChild(btnDelete);
     
     btnDelete.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopImmediatePropagation();
-      // console.log('addImg: btnDelete event',event)
-      // console.log('addImg: btnDelete event.target.dataset.filename', event.target.dataset.filename)
-      // console.log('addImg: img',event.target.parentNode)
       deleteImage(event.target.dataset.filename, thisRoot);
     });
-  // } else {
   }
+  
+  return div;
+}
 
-  // update_all_button =
-    // $el("button.cm-button", {
-      // type: "button",
-      // textContent: "Update All",
-      // onclick:
-        // () => updateAll(this.update_check_checkbox, self)
-    // });
-    
-  // if (debug) console.debug('addImg: return div', div)
-  return div
-} // addImg()
+function addDeleteButton(div, thisRoot) {
+  // 创建删除按钮
+  let btnDelete = document.createElement('button');
+  btnDelete.innerHTML = '✖';
+  btnDelete.classList.add('btn-delete');
+  btnDelete.title = 'Delete';
+  
+  // 添加点击事件
+  btnDelete.onclick = async function(event) {
+    event.stopPropagation();
+    const filename = div.getAttribute('data-value');
+    if (confirm(`确定要删除 ${filename} 吗？`)) {
+      await deleteImage(filename, thisRoot);
+    }
+  };
+  
+  div.appendChild(btnDelete);
+}
 
-
-
-
-
-
-
-// ███████ ██   ██ ████████ 
-// ██       ██ ██     ██    
-// █████     ███      ██    
-// ██       ██ ██     ██    
-// ███████ ██   ██    ██    
+//  █████  ██████  ██████  ██ ███    ███  ██████  
+// ██   ██ ██   ██ ██   ██ ██ ████  ████ ██       
+// ███████ ██   ██ ██   ██ ██ ██ ████ ██ ██   ███ 
+// ██   ██ ██   ██ ██   ██ ██ ██  ██  ██ ██    ██ 
+// ██   ██ ██████  ██████  ██ ██      ██  ██████  
 
 // we should override the core extensions/core/contextMenuFilter.js but I don't know how. Can't use the same name.
 // main problem to get subfolder images from input, is that ComfyUI\nodes.py class LoadImage does not load subfolders
@@ -347,127 +369,173 @@ const ext = {
     // if (debug) console.debug('event.target.id: ',event.target.id);  // no target == is this a reak event?
     // reset storage of deleted images
     localStorage.setItem('thumbnails.DeletedImages', JSON.stringify([]));
-    const ctxMenu = LiteGraph.ContextMenu;
-    if (debug) console.debug('Extension: ctxMenu ----------------', ctxMenu);   // function ContextMenu(values, options)
+    
+    // Store the original context menu function to preserve right-click functionality
+    if (!window.originalLiteGraphContextMenu) {
+      window.originalLiteGraphContextMenu = LiteGraph.ContextMenu;
+    }
+    
+    // Create a wrapper for the original context menu function
+    const ctxMenu = function(values, options) {
+      return window.originalLiteGraphContextMenu.call(this, values, options);
+    };
+    
+    // Copy all properties from the original function to our wrapper
+    for (const prop in window.originalLiteGraphContextMenu) {
+      if (Object.prototype.hasOwnProperty.call(window.originalLiteGraphContextMenu, prop)) {
+        ctxMenu[prop] = window.originalLiteGraphContextMenu[prop];
+      }
+    }
+    
+    // Properly set up the prototype chain
+    Object.setPrototypeOf(ctxMenu, Object.getPrototypeOf(window.originalLiteGraphContextMenu));
+    
+    if (debug) console.debug('Extension: ctxMenu ----------------', ctxMenu);
 
     // we should  find what is passing values to this function and alter the list there
     // values:  array of all the filenames as string in input folder for LoadImage, or custom values for other nodes (that we shall not process)
     // options: style stuff added to thisRoot
     LiteGraph.ContextMenu = function (values, options) {
-      // console.log('myFunc.caller',myFunc.caller)
-      
-      // new bug discovered! when you switch from one load image node dropdown to another, the values are correct but not the current_node! it just lags behind
-      // to fix it, simply select Load Image before clicking the drop down.
-      // const thisCurrentNode = LGraphCanvas.active_canvas.current_node;
-      const thisCurrentNode = options.event.view.LGraphCanvas.active_canvas.current_node;
-      
-      // exclude KJNodes empty latent presets and other similar fake image lists
-      // if (debug) console.debug('Extension: this', this)                                   // Object { }  // empty after upgrade to TS
-      if (debug) console.debug('Extension: thisCurrentNode', thisCurrentNode)
-      if (debug) console.debug('Extension: thisCurrentNode.type', thisCurrentNode?.type)   // LoadImage
-      if (thisCurrentNode?.type !== "LoadImage") return ctxMenu.call(this, values, options);
-
-      let enableThumbnails = app.ui.settings.getSettingValue("Thumbnails.ContextMenuOptions.enableThumbnails");
-      enableThumbnails = (enableThumbnails == undefined) ? enableThumbnailsDefault : enableThumbnails;
-      
-      // cleanup values from folder objects if any, keep only names
-      if (debug) console.debug('Extension: options', options)
-      if (debug) console.debug('Extension: values before', values)  // [{"folder1":[file1,..]}, "file1.png", ..]
-      if (debug) console.debug('Extension: values?.length before', values?.length)
-      // item = "filename1.png" or object { "name": "name1", "files": ["file1.png", ..]}
-
-      let foldersDict = getDictFromStorage('thumbnails.Folders')   // second pass and we cannot rebuild this as folder objects are removed from values
-      let forDeletion = []
-      // let folder = {}
-      values.forEach((item, i) => {
-        if (typeof item == 'object' && item !== null) {
-
-          // build foldersDict that we will use later to rebuild ctx with new values; do not re-add same folder twice.
-          if (!foldersDict[item.name]) foldersDict[item.name] = item?.files
-          
-          // just replace folder object with just its name // 1.24: doing that, second click will show no folders
-          values[i] = item['name']
-
-          // and mark it for deletion if not enableThumbnails
-          if (!enableThumbnails) forDeletion.push(item['name'])
+      try {
+        // Special case for handling empty or invalid values
+        if (!values || !Array.isArray(values) || values.length === 0) {
+          return ctxMenu.call(this, values, options);
         }
-      });
-      pushDictToStorage('thumbnails.Folders', foldersDict);
-
-      if (!enableThumbnails) values = values.filter(item => !forDeletion.includes(item))
-      if (log) console.debug('Extension: forDeletion', forDeletion) // ["file1.png",  ..]
-      if (log) console.debug('Extension: values after', values)     // ["folder1", "file1.png", ..]
-
-      if (log) console.log('Extension: foldersDict', foldersDict) // {"misc": ["qr-error_corrected-example (1).png", ..], ..}
-      
-      // values is a list of all the files in input folder // or maybe the issue is that we should delete the original Comfy.ContextMenuFilter?
-      // if (debug) console.debug('Extension: this', this)  // this is {} after upgrade to TS
-      let ctx = ctxMenu.call(this, values, options);
-      if (debug) console.debug('Extension: ctx', ctx)
-      if (!enableThumbnails) return ctx;
-      if (debug) console.debug('Extension: values?.length after', values?.length)
-      
-      //    "1536 x 640   (landscape)"
-      //    "1344 x 768   (landscape)"
-      // if (debug) console.debug('Extension: options',options)         // {"scale": 1, "event": {"isTrusted": true, "deltaX": 0, "deltaY": 0, "canvasX": 12.2, "canvasY": 8.8}, "className": "dark", "scroll_speed": -0.1}
-
-      // current_node has:
-      // title                            = Load Image / SDXL Empty Latent Image (rgthree) / ..
-      // type                             = LoadImage  / SDXL Empty Latent Image (rgthree) / ..
-      // properties['Node name for S&R']  = LoadImage  / SDXL Empty Latent Image (rgthree) / ..
-
-
-      // create ctx creates thisRoot, the input filter, and the div list
-      // ctx = ctxMenu.call(this, ['misc', 'badgers.png','badgers.png','badgers.png','badgers.png','badgers.png','badgers.png'], options);
-
-
-      // If we are a dark menu (only used for combo boxes) then add a filter input, only for > 10 values
-      // the filter is added by the original Comfy.ContextMenuFilter extension that we cannot de-register, haven't found a way yet
-      // at least we can override it for less than 10 images
-      if (options?.className === "dark" && values?.length > 1) {
-        if (debug) console.debug('Extension: options?.className',options?.className)
-        // we are not replacing the menu filter, otherwise when images are filtered, the original filter listener would take over
-        let filter = document.getElementsByClassName("comfy-context-menu-filter")[0];
-
-        // originalFilter.parentNode.removeChild(originalFilter);
-        // let filter = document.createElement("input");
-        // filter.classList.add("comfy-context-menu-filter");
-        filter.placeholder = "Filter images";
-        // this.root.prepend(filter);
-
-        // let thisRoot = this.root                 // 'this' is undefined after October 2024 upgrade to TS
-        let thisRoot = ctx.root
-        if (debug) console.debug('Extension: thisRoot before', thisRoot)  // undefined after October 2024 upgrade to TS
-        if (debug) console.debug('Extension: getListFromStorage', getListFromStorage('thumbnails.DeletedImages'))   // empty until you delete smth
-        // we need to find what controls the content of values in LiteGraph.ContextMenu = function (values, options) and the buildup of ".litemenu-entry"
-        for (var deletedImage of getListFromStorage('thumbnails.DeletedImages')) {
-          let childToDelete = thisRoot.querySelectorAll(`[data-value="${decodeURIComponent(deletedImage)}"]`)[0]
-          if (debug) console.debug('Extension: deletedImage', deletedImage, 'childToDelete', childToDelete)
-          if (childToDelete) thisRoot.removeChild(childToDelete)
+        
+        // Handle cases where options or event might be undefined or not properly structured
+        if (!options || !options.event) {
+          return ctxMenu.call(this, values, options);
         }
-        if (debug) console.debug('Extension: thisRoot after', thisRoot)  // undefined after October 2024 upgrade to TS
+        
+        // First check: is this a LoadImage node based on the values content?
+        // This is more reliable than checking the node type
+        let isLoadImageValues = false;
+        
+        // Check if values contains image files or folder objects
+        for (let i = 0; i < values.length && !isLoadImageValues; i++) {
+          const item = values[i];
+          // Check if it's an image file
+          if (typeof item === 'string') {
+            const ext = (item.split('.').pop() || '').toLowerCase();
+            if (imagesExt.includes(ext)) {
+              isLoadImageValues = true;
+              break;
+            }
+          }
+          // Check if it's a folder object
+          else if (item && typeof item === 'object' && item.name && item.files) {
+            isLoadImageValues = true;
+            break;
+          }
+        }
+        
+        // If not LoadImage values, use original context menu
+        if (!isLoadImageValues) {
+          return ctxMenu.call(this, values, options);
+        }
+        
+        // For LoadImage values, proceed with our custom handling
+        // No need to check node type anymore as we've already confirmed this is for LoadImage
+        let enableThumbnails = app.ui.settings.getSettingValue("Thumbnails.ContextMenuOptions.enableThumbnails");
+        enableThumbnails = (enableThumbnails == undefined) ? enableThumbnailsDefault : enableThumbnails;
+        
+        // cleanup values from folder objects if any, keep only names
+        if (debug) console.debug('Extension: options', options)
+        if (debug) console.debug('Extension: values before', values)  // [{"folder1":[file1,..]}, "file1.png", ..]
+        if (debug) console.debug('Extension: values?.length before', values?.length)
+        
+        let foldersDict = getDictFromStorage('thumbnails.Folders')   // second pass and we cannot rebuild this as folder objects are removed from values
+        let forDeletion = []
+        // let folder = {}
+        values.forEach((item, i) => {
+          if (typeof item == 'object' && item !== null) {
 
-        let items = Array.from(thisRoot.querySelectorAll(".litemenu-entry"));
-        // subfolders values are objects, but in the generated div items innerHTML/innerText, it's actually "[object Object]"
-        if (log) console.debug('Extension: items', items)
-        // Array(18) [ div.litemenu-entry.submenu, .. ]
-        //    <div class="litemenu-entry submenu masonry-item" role="menuitem" data-value="[object Object]">
-        //    <div class="litemenu-entry submenu masonry-item hideText" role="menuitem" data-value="badgers - Copy.png" data-size="1024x1024">
-        //    ...
-        let displayedItems = [...items];
+            // build foldersDict that we will use later to rebuild ctx with new values; do not re-add same folder twice.
+            if (!foldersDict[item.name]) foldersDict[item.name] = item?.files
+            
+            // just replace folder object with just its name // 1.24: doing that, second click will show no folders
+            values[i] = item['name']
 
-        //  █████  ██████  ██████      ██ ███    ███  ██████      ███    ██  ██████  ██     ██ 
-        // ██   ██ ██   ██ ██   ██     ██ ████  ████ ██           ████   ██ ██    ██ ██     ██ 
-        // ███████ ██   ██ ██   ██     ██ ██ ████ ██ ██   ███     ██ ██  ██ ██    ██ ██  █  ██ 
-        // ██   ██ ██   ██ ██   ██     ██ ██  ██  ██ ██    ██     ██  ██ ██ ██    ██ ██ ███ ██ 
-        // ██   ██ ██████  ██████      ██ ██      ██  ██████      ██   ████  ██████   ███ ███  
+            // and mark it for deletion if not enableThumbnails
+            if (!enableThumbnails) forDeletion.push(item['name'])
+          }
+        });
+        pushDictToStorage('thumbnails.Folders', foldersDict);
 
-        // we only care about LoadImage types, that actually load images from input folder
-        if (enableThumbnails === true) {
-          // let displayedItems = [...items.map(addImg)]; // we need to pass thisRoot as well
-          // displayedItems = [...items.map(function(el) { return addImg(el, thisRoot, folders) })]; // we pass thisRoot to addImg so the btnDelete event can delete the item
-          // displayedItems = [...items.map(function(el) { return addImg(el, thisRoot, foldersDict) })]; // we pass thisRoot to addImg so the btnDelete event can delete the item
-          displayedItems = [...items.map(function(el) { return addImg(el, thisRoot, ctxMenu, options) })]; // foldersDict is now getListFromStorage('thumbnails.Folders')
+        if (!enableThumbnails) values = values.filter(item => !forDeletion.includes(item))
+        if (log) console.debug('Extension: forDeletion', forDeletion) // ["file1.png",  ..]
+        if (log) console.debug('Extension: values after', values)     // ["folder1", "file1.png", ..]
+
+        if (log) console.log('Extension: foldersDict', foldersDict) // {"misc": ["qr-error_corrected-example (1).png", ..], ..}
+        
+        // values is a list of all the files in input folder // or maybe the issue is that we should delete the original Comfy.ContextMenuFilter?
+        // if (debug) console.debug('Extension: this', this)  // this is {} after upgrade to TS
+        let ctx = ctxMenu.call(this, values, options);
+        if (debug) console.debug('Extension: ctx', ctx)
+        if (!enableThumbnails) return ctx;
+        if (debug) console.debug('Extension: values?.length after', values?.length)
+        
+        //    "1536 x 640   (landscape)"
+        //    "1344 x 768   (landscape)"
+        // if (debug) console.debug('Extension: options',options)         // {"scale": 1, "event": {"isTrusted": true, "deltaX": 0, "deltaY": 0, "canvasX": 12.2, "canvasY": 8.8}, "className": "dark", "scroll_speed": -0.1}
+
+        // current_node has:
+        // title                            = Load Image / SDXL Empty Latent Image (rgthree) / ..
+        // type                             = LoadImage  / SDXL Empty Latent Image (rgthree) / ..
+        // properties['Node name for S&R']  = LoadImage  / SDXL Empty Latent Image (rgthree) / ..
+
+
+        // create ctx creates thisRoot, the input filter, and the div list
+        // ctx = ctxMenu.call(this, ['misc', 'badgers.png','badgers.png','badgers.png','badgers.png','badgers.png','badgers.png'], options);
+
+
+        // If we are a dark menu (only used for combo boxes) then add a filter input, only for > 10 values
+        // the filter is added by the original Comfy.ContextMenuFilter extension that we cannot de-register, haven't found a way yet
+        // at least we can override it for less than 10 images
+        if (options?.className === "dark" && values?.length > 1) {
+          if (debug) console.debug('Extension: options?.className',options?.className)
+          // we are not replacing the menu filter, otherwise when images are filtered, the original filter listener would take over
+          let filter = document.getElementsByClassName("comfy-context-menu-filter")[0];
+
+          // originalFilter.parentNode.removeChild(originalFilter);
+          // let filter = document.createElement("input");
+          // filter.classList.add("comfy-context-menu-filter");
+          filter.placeholder = "Filter images";
+          // this.root.prepend(filter);
+
+          // let thisRoot = this.root                 // 'this' is undefined after October 2024 upgrade to TS
+          let thisRoot = ctx.root
+          if (debug) console.debug('Extension: thisRoot before', thisRoot)  // undefined after October 2024 upgrade to TS
+          if (debug) console.debug('Extension: getListFromStorage', getListFromStorage('thumbnails.DeletedImages'))   // empty until you delete smth
+          // we need to find what controls the content of values in LiteGraph.ContextMenu = function (values, options) and the buildup of ".litemenu-entry"
+          for (var deletedImage of getListFromStorage('thumbnails.DeletedImages')) {
+            let childToDelete = thisRoot.querySelectorAll(`[data-value="${decodeURIComponent(deletedImage)}"]`)[0]
+            if (debug) console.debug('Extension: deletedImage', deletedImage, 'childToDelete', childToDelete)
+            if (childToDelete) thisRoot.removeChild(childToDelete)
+          }
+          if (debug) console.debug('Extension: thisRoot after', thisRoot)  // undefined after October 2024 upgrade to TS
+
+          let items = Array.from(thisRoot.querySelectorAll(".litemenu-entry"));
+          // subfolders values are objects, but in the generated div items innerHTML/innerText, it's actually "[object Object]"
+          if (log) console.debug('Extension: items', items)
+          // Array(18) [ div.litemenu-entry.submenu, .. ]
+          //    <div class="litemenu-entry submenu masonry-item" role="menuitem" data-value="[object Object]">
+          //    <div class="litemenu-entry submenu masonry-item hideText" role="menuitem" data-value="badgers - Copy.png" data-size="1024x1024">
+          //    ...
+          let displayedItems = [...items];
+
+          //  █████  ██████  ██████      ██ ███    ███  ██████      ███    ██  ██████  ██     ██ 
+          // ██   ██ ██   ██ ██   ██     ██ ████  ████ ██           ████   ██ ██    ██ ██     ██ 
+          // ███████ ██   ██ ██   ██     ██ ██ ████ ██ ██   ███     ██ ██  ██ ██    ██ ██  █  ██ 
+          // ██   ██ ██   ██ ██   ██     ██ ██  ██  ██ ██    ██     ██  ██ ██ ██    ██ ██ ███ ██ 
+          // ██   ██ ██████  ██████      ██ ██      ██  ██████      ██   ████  ██████   ███ ███  
+
+          // we only care about LoadImage types, that actually load images from input folder
+          if (enableThumbnails === true) {
+            // let displayedItems = [...items.map(addImg)]; // we need to pass thisRoot as well
+            // displayedItems = [...items.map(function(el) { return addImg(el, thisRoot, folders) })]; // we pass thisRoot to addImg so the btnDelete event can delete the item
+            // displayedItems = [...items.map(function(el) { return addImg(el, thisRoot, foldersDict) })]; // we pass thisRoot to addImg so the btnDelete event can delete the item
+            displayedItems = [...items.map(function(el) { return addImg(el, thisRoot, ctxMenu, options) })]; // foldersDict is now getListFromStorage('thumbnails.Folders')
 /*
 filtering and removing elements here does not help. We need to alter values directly, before ctx is instanced
 
@@ -539,253 +607,89 @@ filtering and removing elements here does not help. We need to alter values dire
             switch (event.key) {
               case "ArrowUp":
                 event.preventDefault();
-                if (selectedIndex === 0) {
-                  selectedIndex = itemCount - 1;
-                } else {
-                  selectedIndex--;
-                }
-                updateSelected();
-                break;
-              case "ArrowRight":
-                event.preventDefault();
-                selectedIndex = itemCount - 1;
+                selectedIndex = Math.max(0, selectedIndex - 1);
                 updateSelected();
                 break;
               case "ArrowDown":
                 event.preventDefault();
-                if (selectedIndex === itemCount - 1) {
-                  selectedIndex = 0;
-                } else {
-                  selectedIndex++;
-                }
-                updateSelected();
-                break;
-              case "ArrowLeft":
-                event.preventDefault();
-                selectedIndex = 0;
+                selectedIndex = Math.min(itemCount - 1, selectedIndex + 1);
                 updateSelected();
                 break;
               case "Enter":
-                selectedItem?.click();
+                event.preventDefault();
+                if (selectedItem) {
+                  selectedItem.click();
+                }
                 break;
               case "Escape":
-                this.close();
+                event.preventDefault();
+                thisRoot.remove();
                 break;
             }
           });
 
-          filter.addEventListener("input", (event) => {
-            // Hide all items that don't match our filter
-            const term = filter.value.toLocaleLowerCase();
-            // When filtering, recompute which items are visible for arrow up/down and maintain selection.
-            // console.log('displayedItems',displayedItems)
-            // console.log('items',items)
-            displayedItems = items.filter(item => {
-              const isVisible = !term || item.textContent.toLocaleLowerCase().includes(term);
-              // item.style.display = isVisible ? "block" : "none";
-              item.style.display = isVisible ? "inline-grid" : "none";
-              item.style.display = isVisible ? "inline-grid" : "none";  // we double it to overrive the core filter that is still active
-              return isVisible;
-            });
-
-            selectedIndex = 0;
-            if (displayedItems.includes(selectedItem)) {
-              selectedIndex = displayedItems.findIndex(d => d === selectedItem);
+          // Adjust the list position if it's off-screen
+          if (options.event) {
+            let left = options.event.clientX - 10;
+            if (left < 0) {
+              left = 0;
             }
-            itemCount = displayedItems.length;
 
-            updateSelected();
+            thisRoot.style.left = left + "px";
 
-            // If we have an event then we can try and position the list under the source
-            if (options.event) {
-              let top = options.event.clientY - 10;
+            let top = options.event.clientY - 10;
 
-              const bodyRect = document.body.getBoundingClientRect();
-              const rootRect = this.root.getBoundingClientRect();
-              if (bodyRect.height && top > bodyRect.height - rootRect.height - 10) {
-                top = Math.max(0, bodyRect.height - rootRect.height - 10);
-              }
-
-              this.root.style.top = top + "px";
-              positionList();
+            const bodyRect = document.body.getBoundingClientRect();
+            const rootRect = thisRoot.getBoundingClientRect();
+            if (bodyRect.height && top > bodyRect.height - rootRect.height - 10) {
+              top = Math.max(0, bodyRect.height - rootRect.height - 10);
             }
-          });
 
-          requestAnimationFrame((event) => {
-            // Focus the filter box when opening
-            filter.focus();
-
+            thisRoot.style.top = top + "px";
             positionList();
-          });
-        })
+          }
+        });
 
+        requestAnimationFrame((event) => {
+          // Focus the filter box when opening
+          filter.focus();
+
+          positionList();
+        });
       } // dark
-
+        
       // console.log('return ctx')
       return ctx;
-    };
-    
-    LiteGraph.ContextMenu.prototype = ctxMenu.prototype;
+    } catch (error) {
+      console.error("Error in LoadImageThumbnails context menu:", error);
+      return ctxMenu.call(this, values, options);
+    }
+  };
+  
+  // Ensure we don't lose prototype methods
+  Object.setPrototypeOf(LiteGraph.ContextMenu, Object.getPrototypeOf(ctxMenu));
+  
+  // Copy all properties from our wrapper to the new function
+  for (const prop in ctxMenu) {
+    if (Object.prototype.hasOwnProperty.call(ctxMenu, prop)) {
+      LiteGraph.ContextMenu[prop] = ctxMenu[prop];
+    }
+  }
   },
 }
 
 const cssPromise = injectCss("extensions/ComfyUI-Thumbnails/css/contextMenuFilterThumbnails.css");  // for some reason we cannot use the actual path /web/css
+
+// Restore original context menu when extension is unloaded
+app.cleanupExtension = function() {
+  if (window.originalLiteGraphContextMenu) {
+    // Fully restore the original context menu function
+    LiteGraph.ContextMenu = window.originalLiteGraphContextMenu;
+    
+    // Clear the reference
+    delete window.originalLiteGraphContextMenu;
+  }
+};
 // const jsPromise = injectJs("https://cdnjs.cloudflare.com/ajax/libs/jquery.imagesloaded/4.1.4/imagesloaded.pkgd.min.js");
 // const jsPromise = injectJs("https://cdnjs.cloudflare.com/ajax/libs/jquery.imagesloaded/5.0.0/imagesloaded.pkgd.min.js");
 app.registerExtension(ext);
-
-
-
-
-
-
-
-/* 
-// ----------- E:\GPT\ComfyUI\custom_nodes\ComfyUI-Manager\js\comfyui-manager.js
-class ManagerMenuDialog extends ComfyDialog {
-  createControlsLeft() {
-    let self = this;
-    default_ui_combo.addEventListener('change', function (event) {
-      api.fetchApi(`/manager/default_ui?value=${event.target.value}`);
-    });
-    api.fetchApi('/manager/dbl_click/policy')
-      .then(response => response.text())
-      .then(data => {
-        dbl_click_policy_combo.value = data;
-        set_double_click_policy(data);
-      });
-    api.fetchApi('/manager/share_option')
-      .then(response => response.text())
-      .then(data => {
-        share_combo.value = data || 'all';
-        share_option = data || 'all';
-      });
-
-    share_combo.addEventListener('change', function (event) {
-      const value = event.target.value;
-      share_option = value;
-      api.fetchApi(`/manager/share_option?value=${value}`);
-      const shareButton = document.getElementById("shareButton");
-      if (value === 'none') {
-        shareButton.style.display = "none";
-      } else {
-        shareButton.style.display = "inline-block";
-      }
-    });
-    return [
-      $el("div", {}, [this.update_check_checkbox, uc_checkbox_text]),
-      $el("br", {}, []),
-      this.datasrc_combo,
-      channel_combo,
-      preview_combo,
-      badge_combo,
-      default_ui_combo,
-      share_combo,
-      component_policy_combo,
-      dbl_click_policy_combo,
-      $el("br", {}, []),
-
-      $el("br", {}, []),
-      $el("filedset.cm-experimental", {}, [
-          $el("legend.cm-experimental-legend", {}, ["EXPERIMENTAL"]),
-          $el("button.cm-experimental-button", {
-            type: "button",
-            textContent: "Snapshot Manager",
-            onclick:
-              () => {
-                if(!SnapshotManager.instance)
-                SnapshotManager.instance = new SnapshotManager(app, self);
-                SnapshotManager.instance.show();
-              }
-          }),
-          $el("button.cm-experimental-button", {
-            type: "button",
-            textContent: "Install PIP packages",
-            onclick:
-              () => {
-                var url = prompt("Please enumerate the pip packages to be installed.\n\nExample: insightface opencv-python-headless>=4.1.1\n", "");
-
-                if (url !== null) {
-                  install_pip(url, self);
-                }
-              }
-          }),
-          $el("button.cm-experimental-button", {
-            type: "button",
-            textContent: "Unload models",
-            onclick: () => { free_models(); }
-          })
-        ]),
-    ];
-  }
-  constructor() {
-    super();
-
-    const close_button = $el("button", { id: "cm-close-button", type: "button", textContent: "Close", onclick: () => this.close() });
-
-    const content =
-        $el("div.comfy-modal-content",
-          [
-            $el("tr.cm-title", {}, [
-                $el("font", {size:6, color:"white"}, [`ComfyUI Manager Menu`])]
-              ),
-            $el("br", {}, []),
-            $el("div.cm-menu-container",
-              [
-                $el("div.cm-menu-column", [...this.createControlsLeft()]),
-                $el("div.cm-menu-column", [...this.createControlsMid()]),
-                $el("div.cm-menu-column", [...this.createControlsRight()])
-              ]),
-
-            $el("br", {}, []),
-            close_button,
-          ]
-        );
-
-    content.style.width = '100%';
-    content.style.height = '100%';
-
-    this.element = $el("div.comfy-modal", { id:'cm-manager-dialog', parent: document.body }, [ content ]);
-  }
-}
-
- */
-/* 
-app.registerExtension({
-	name: "Comfy.ManagerMenu",
-	init() {
-		$el("style", {
-			textContent: style,
-			parent: document.head,
-		});
-	},
-	async setup() {
-		let orig_clear = app.graph.clear;
-		app.graph.clear = function () {
-			orig_clear.call(app.graph);
-			load_components();
-		};
-
-		load_components();
-
-		const menu = document.querySelector(".comfy-menu");
-		const separator = document.createElement("hr");
-
-		separator.style.margin = "20px 0";
-		separator.style.width = "100%";
-		menu.append(separator);
-
-		const managerButton = document.createElement("button");
-		managerButton.textContent = "Manager";
-		managerButton.onclick = () => {
-				if(!manager_instance)
-					setManagerInstance(new ManagerMenuDialog());
-				manager_instance.show();
-			}
-		menu.append(managerButton);
-...
-
- */
-
-
-

@@ -1,14 +1,17 @@
 .litegraph.litecontextmenu {
   /* left: initial !important; */
   /* top: 100px !important; */
+  max-height: 80vh !important; /* Limit the height of the context menu */
+  overflow-y: auto !important; /* Add scrolling for long menus */
 }
 
 /* https://css-tricks.com/piecing-together-approaches-for-a-css-masonry-layout/ */
 .masonry {
   display: grid;
   grid-gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(200px,1fr));
-  grid-auto-rows: 0;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); /* Smaller minimum width for more columns */
+  grid-auto-rows: auto; /* Allow rows to size based on content */
+  max-width: 800px; /* Limit maximum width of the grid */
 }
 
 .masonry-item {
@@ -27,13 +30,15 @@
   position: relative;
   display: inline-grid;
   /* max-height is handled by contextMenuFilterThumbnails.js since it's a manager option */
-  /* max-height: 100px; */
+  min-height: 100px; /* Minimum height to ensure thumbnails are visible */
+  max-height: 200px; /* Maximum height to prevent overly tall thumbnails */
   /* trick to get lazy load holder size reserved AND keep aspect ratio: add min-width < width, and max-width 100% */
-  min-width: 50px;
+  min-width: 100px; /* Increase minimum width for better visibility */
   max-width: 100%;
   width: auto;
   height: auto;
-  margin:auto;
+  margin: auto;
+  object-fit: contain; /* Ensure the image is fully visible without cropping */
 }
 
 
